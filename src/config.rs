@@ -364,6 +364,10 @@ pub struct VmRecord {
     #[serde(default)]
     pub network: bool,
 
+    /// Enable GPU acceleration (virtio-gpu with Venus/Vulkan).
+    #[serde(default)]
+    pub gpu: Option<bool>,
+
     /// Restart configuration.
     #[serde(default)]
     pub restart: RestartConfig,
@@ -481,6 +485,7 @@ impl VmRecord {
             mounts,
             ports,
             network,
+            gpu: None,
             restart: RestartConfig::default(),
             last_exit_code: None,
             init: Vec::new(),
@@ -526,6 +531,7 @@ impl VmRecord {
             mounts,
             ports,
             network,
+            gpu: None,
             restart,
             last_exit_code: None,
             init: Vec::new(),
@@ -602,6 +608,7 @@ impl VmRecord {
             memory_mib: self.mem,
             network: self.network,
             network_backend: self.network_backend,
+            gpu: self.gpu.unwrap_or(false),
             storage_gib: self.storage_gb,
             overlay_gib: self.overlay_gb,
             allowed_cidrs: self.allowed_cidrs.clone(),
@@ -904,5 +911,28 @@ mod tests {
         let deserialized: VmRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.storage_gb, Some(50));
         assert_eq!(deserialized.overlay_gb, Some(20));
+    }
+
+    #[test]
+    fn test_vm_record_gpu_field() {
+        // GPU defaults to None (not set)
+        let record = VmRecord::new("test".to_string(), 2, 1024, vec![], vec![], false);
+        assert_eq!(record.gpu, None);
+        assert!(!record.vm_resources().gpu);
+
+        // GPU set to true
+        let mut record = VmRecord::new("test".to_string(), 2, 1024, vec![], vec![], false);
+        record.gpu = Some(true);
+        assert!(record.vm_resources().gpu);
+
+        // GPU serializes/deserializes
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: VmRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.gpu, Some(true));
+
+        // New records default to gpu = None → vm_resources().gpu = false
+        let default_record = VmRecord::new("default".to_string(), 1, 512, vec![], vec![], false);
+        assert_eq!(default_record.gpu, None);
+        assert!(!default_record.vm_resources().gpu);
     }
 }

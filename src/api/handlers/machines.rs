@@ -320,6 +320,7 @@ pub async fn create_machine(
         cpus: Some(cpus),
         memory_mb: Some(mem),
         network: Some(network),
+        gpu: Some(req.gpu),
         storage_gb: req.storage_gb,
         overlay_gb: req.overlay_gb,
         allowed_cidrs: req.allowed_cidrs.clone(),

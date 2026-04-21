@@ -400,6 +400,8 @@ pub struct CreateVmParams {
     pub health_retries: Option<u32>,
     pub health_startup_grace_secs: Option<u64>,
     pub ssh_agent: bool,
+    /// Enable GPU acceleration (virtio-gpu with Venus/Vulkan).
+    pub gpu: bool,
     /// Hostnames for DNS filtering (from --allow-host / [network].allow_hosts).
     pub dns_filter_hosts: Option<Vec<String>>,
     /// Absolute path to .smolmachine sidecar (for machines created with --from).
@@ -462,6 +464,7 @@ pub fn create_vm(params: CreateVmParams) -> smolvm::Result<()> {
     record.overlay_gb = params.overlay_gb;
     record.allowed_cidrs = params.allowed_cidrs.clone();
     record.network_backend = params.network_backend;
+    record.gpu = if params.gpu { Some(true) } else { None };
     record.image = params.image.clone();
     record.entrypoint = params.entrypoint.clone();
     record.cmd = params.cmd.clone();

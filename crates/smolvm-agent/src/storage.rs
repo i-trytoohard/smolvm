@@ -2052,6 +2052,7 @@ pub fn run_command(
         let identity = crate::oci::resolve_process_identity(Path::new(&prepared.rootfs_path), user)
             .map_err(StorageError::new)?;
         let mut spec = OciSpec::new(command, env, workdir_str, false, &identity);
+        spec.add_gpu_devices_if_available();
 
         // Add virtiofs bind mounts to OCI spec
         for (tag, container_path, read_only) in mounts {

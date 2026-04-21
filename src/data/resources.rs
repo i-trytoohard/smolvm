@@ -21,6 +21,9 @@ pub struct VmResources {
     /// Preferred network backend override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_backend: Option<NetworkBackend>,
+    /// Enable GPU acceleration (virtio-gpu with Venus/Vulkan).
+    #[serde(default)]
+    pub gpu: bool,
     /// Storage disk size in GiB (None = default 20 GiB).
     pub storage_gib: Option<u64>,
     /// Overlay disk size in GiB (None = default 10 GiB).
@@ -74,6 +77,7 @@ impl Default for VmResources {
             memory_mib: DEFAULT_MICROVM_MEMORY_MIB,
             network: false,
             network_backend: None,
+            gpu: false,
             storage_gib: None,
             overlay_gib: None,
             allowed_cidrs: None,

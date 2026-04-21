@@ -120,6 +120,13 @@ fn main() {
     // This must happen before logging (which needs /dev for output).
     mount_essential_filesystems();
 
+    // Create /dev/dri device nodes if virtio-gpu is present.
+    // libkrun's init.c mounts /dev as a basic tmpfs, so DRM nodes are not
+    // auto-created by devtmpfs. We read major:minor from /sys/class/drm/ and
+    // mknod them so containers can access the GPU render node.
+    #[cfg(target_os = "linux")]
+    setup_gpu_dev_nodes();
+
     // Set up persistent rootfs overlay (if /dev/vdb exists).
     // This does overlayfs + pivot_root before anything else touches the filesystem.
     setup_persistent_rootfs();
@@ -419,6 +426,75 @@ fn mount_essential_filesystems() {
 #[cfg(not(target_os = "linux"))]
 fn mount_essential_filesystems() {
     // No-op on non-Linux platforms
+}
+
+/// Create /dev/dri device nodes for virtio-gpu if present.
+///
+/// libkrun's init.c mounts /dev as a basic tmpfs so the kernel's devtmpfs
+/// doesn't auto-populate DRM device nodes. This function reads each render
+/// node and card from /sys/class/drm/ and creates the corresponding
+/// character device node in /dev/dri/ so containers can access the GPU.
+#[cfg(target_os = "linux")]
+fn setup_gpu_dev_nodes() {
+    let sysfs_drm = std::path::Path::new("/sys/class/drm");
+    if !sysfs_drm.exists() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(sysfs_drm) else {
+        return;
+    };
+    let entries: Vec<_> = entries.flatten().collect();
+
+    // Only proceed if there are DRM nodes (render nodes or cards)
+    let has_nodes = entries.iter().any(|e| {
+        let n = e.file_name();
+        let s = n.to_string_lossy();
+        s.starts_with("renderD") || s.starts_with("card")
+    });
+    if !has_nodes {
+        return;
+    }
+
+    let _ = std::fs::create_dir_all("/dev/dri");
+
+    for entry in &entries {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("renderD") && !name_str.starts_with("card") {
+            continue;
+        }
+
+        // Read major:minor from sysfs (e.g. "226:128\n")
+        let dev_file = sysfs_drm.join(&*name_str).join("dev");
+        let Ok(dev_str) = std::fs::read_to_string(&dev_file) else {
+            continue;
+        };
+        let parts: Vec<&str> = dev_str.trim().split(':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let Ok(major) = parts[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(minor) = parts[1].parse::<u32>() else {
+            continue;
+        };
+
+        let node_path = format!("/dev/dri/{}", name_str);
+        let Ok(node_cstr) = std::ffi::CString::new(node_path) else {
+            continue;
+        };
+
+        // SAFETY: mknod a character device node with the DRM major:minor from sysfs
+        unsafe {
+            libc::mknod(
+                node_cstr.as_ptr(),
+                libc::S_IFCHR | 0o666,
+                libc::makedev(major, minor),
+            );
+        }
+    }
 }
 
 /// Set up persistent rootfs overlay using overlayfs on /dev/vdb.
@@ -2314,6 +2390,7 @@ fn spawn_interactive_command(
     // terminal: true tells crun to set up a controlling terminal (setsid + TIOCSCTTY)
     let identity = oci::resolve_process_identity(rootfs_path, user)?;
     let mut spec = oci::OciSpec::new(command, env, workdir_str, tty, &identity);
+    spec.add_gpu_devices_if_available();
 
     for (tag, container_path, read_only) in mounts {
         let virtiofs_mount = Path::new(paths::VIRTIOFS_MOUNT_ROOT).join(tag);
@@ -2406,6 +2483,7 @@ fn spawn_interactive_command(
     let workdir_str = workdir.unwrap_or("/");
     let identity = oci::resolve_process_identity(rootfs_path, user)?;
     let mut spec = oci::OciSpec::new(command, env, workdir_str, false, &identity);
+    spec.add_gpu_devices_if_available();
 
     for (tag, container_path, read_only) in mounts {
         let virtiofs_mount = Path::new(paths::VIRTIOFS_MOUNT_ROOT).join(tag);

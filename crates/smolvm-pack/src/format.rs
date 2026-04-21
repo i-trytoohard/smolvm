@@ -364,6 +364,10 @@ pub struct PackManifest {
     #[serde(default)]
     pub network: bool,
 
+    /// Enable GPU acceleration (Vulkan via virtio-gpu).
+    #[serde(default)]
+    pub gpu: bool,
+
     /// Host platform this .smolmachine runs on (e.g., "darwin/arm64").
     /// Distinct from `platform` which is the guest architecture (always linux).
     /// Used for registry Image Index resolution.
@@ -448,6 +452,7 @@ impl PackManifest {
             mem: 256,
             image_size: 0,
             network: false,
+            gpu: false,
             host_platform,
             created: rfc3339_now(),
             smolvm_version: env!("CARGO_PKG_VERSION").to_string(),

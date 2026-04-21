@@ -247,6 +247,10 @@ pub struct RunCmd {
     #[arg(long, help_heading = "Network")]
     pub outbound_localhost_only: bool,
 
+    /// Enable GPU acceleration (Vulkan via virtio-gpu)
+    #[arg(long, help_heading = "Resources")]
+    pub gpu: bool,
+
     /// Number of virtual CPUs
     #[arg(long, default_value_t = DEFAULT_MICROVM_CPU_COUNT, value_name = "N", help_heading = "Resources")]
     pub cpus: u8,
@@ -362,6 +366,7 @@ impl RunCmd {
             memory_mib: params.mem,
             network: params.net,
             network_backend: params.network_backend,
+            gpu: self.gpu,
             storage_gib: params.storage_gb,
             overlay_gib: params.overlay_gb,
             allowed_cidrs: params.allowed_cidrs.clone(),
@@ -981,6 +986,10 @@ pub struct CreateCmd {
     #[arg(long)]
     pub outbound_localhost_only: bool,
 
+    /// Enable GPU acceleration (Vulkan via virtio-gpu)
+    #[arg(long)]
+    pub gpu: bool,
+
     /// Run command on every VM start (can be used multiple times)
     #[arg(long = "init", value_name = "COMMAND")]
     pub init: Vec<String>,
@@ -1058,6 +1067,7 @@ impl CreateCmd {
             memory_mib: params.mem,
             network: params.net,
             network_backend: params.network_backend,
+            gpu: params.gpu,
             storage_gib: params.storage_gb,
             overlay_gib: params.overlay_gb,
             allowed_cidrs: params.allowed_cidrs.clone(),
@@ -1069,6 +1079,9 @@ impl CreateCmd {
         )?;
         if self.ssh_agent {
             params.ssh_agent = true;
+        }
+        if self.gpu {
+            params.gpu = true;
         }
         PortMapping::check_duplicates(&params.port)
             .map_err(|e| smolvm::Error::config("validate ports", e))?;
@@ -1154,6 +1167,7 @@ impl CreateCmd {
             health_startup_grace_secs: None,
             ssh_agent: self.ssh_agent,
             dns_filter_hosts: None,
+            gpu: manifest.gpu,
             source_smolmachine: Some(canonical_path),
         };
 

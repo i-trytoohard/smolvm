@@ -208,6 +208,8 @@ pub struct Smolfile {
     pub memory: Option<u32>,
     /// Enable outbound networking.
     pub net: Option<bool>,
+    /// Enable GPU acceleration (Vulkan via virtio-gpu).
+    pub gpu: Option<bool>,
     /// Storage disk size in GiB.
     pub storage: Option<u64>,
     /// Overlay disk size in GiB.
