@@ -226,6 +226,37 @@ The host SSH agent signs challenges but never sends private keys across the boun
 
 Requires `SSH_AUTH_SOCK` to be set on the host. If missing, smolvm exits with an error and remediation instructions.
 
+## GPU Acceleration
+
+Enable the host GPU inside a VM with `--gpu`. Guest Vulkan talks to the host GPU via virtio-gpu/Venus; ANGLE uses it as the WebGL/OpenGL ES backend.
+
+```bash
+# One-shot GPU workload
+smolvm machine run --gpu --image alpine -- sh -c '
+  apk add --no-cache mesa-vulkan-virtio vulkan-tools
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json \
+  vulkaninfo --summary 2>/dev/null | grep deviceName
+'
+# → deviceName = Virtio-GPU Venus (Intel(R) UHD Graphics ...)
+
+# Persistent GPU machine
+smolvm machine create browser --gpu --gpu-vram 2048
+smolvm machine start --name browser
+smolvm machine exec --name browser -- \
+  chromium --headless=new --no-sandbox --use-gl=angle --use-angle=vulkan \
+    --screenshot=/tmp/out.png --window-size=1280,800 https://example.com
+```
+
+The guest must set `VK_ICD_FILENAMES` so the Vulkan loader finds the virtio ICD. Put it in `env` in a Smolfile to avoid repeating it on every exec:
+
+```toml
+gpu = true
+gpu_vram = 2048
+env = ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json"]
+```
+
+For a complete working example see [`examples/headless-browser/browser.smolfile`](examples/headless-browser/browser.smolfile).
+
 ## File Copy
 
 Copy files between the host and a running machine using `machine:path` syntax:

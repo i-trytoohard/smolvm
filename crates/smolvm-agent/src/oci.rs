@@ -1191,7 +1191,8 @@ mod tests {
     #[test]
     fn test_gpu_devices_added_when_dri_exists() {
         // On a system with /dev/dri (GPU-enabled VM), devices should be added
-        let mut spec = OciSpec::new(&["echo".to_string()], &[], "/", false);
+        let identity = ProcessIdentity::root();
+        let mut spec = OciSpec::new(&["echo".to_string()], &[], "/", false, &identity);
         let before = spec.linux.devices.len();
         spec.add_gpu_devices_if_available();
 
@@ -1212,7 +1213,8 @@ mod tests {
 
     #[test]
     fn test_gpu_devices_correct_properties() {
-        let mut spec = OciSpec::new(&["echo".to_string()], &[], "/", false);
+        let identity = ProcessIdentity::root();
+        let mut spec = OciSpec::new(&["echo".to_string()], &[], "/", false, &identity);
         // Manually add GPU devices to verify properties
         spec.linux.devices.push(super::OciDevice {
             device_type: "c".to_string(),

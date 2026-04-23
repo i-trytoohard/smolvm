@@ -492,7 +492,7 @@ impl VmRecord {
             network,
             gpu: None,
             gpu_vram_mib: None,
-            restart:RestartConfig::default(),
+            restart: RestartConfig::default(),
             last_exit_code: None,
             init: Vec::new(),
             env: Vec::new(),

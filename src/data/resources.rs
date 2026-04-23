@@ -127,10 +127,8 @@ impl VmResources {
 /// `params.gpu_vram_mib = validate_gpu_vram_mib(user_input)?;`
 pub fn validate_gpu_vram_mib(v: Option<u32>) -> Result<Option<u32>, &'static str> {
     match v {
-        Some(0) => Err(
-            "--gpu-vram must be a positive number of MiB; \
-             use a value >= 1 or omit the flag to get the default",
-        ),
+        Some(0) => Err("--gpu-vram must be a positive number of MiB; \
+             use a value >= 1 or omit the flag to get the default"),
         other => Ok(other),
     }
 }

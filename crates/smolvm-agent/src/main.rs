@@ -58,8 +58,19 @@ fn format_boot_log(level: &str, msg: &str) -> String {
 /// Write a structured JSON log line to stderr during early boot,
 /// before tracing_subscriber is initialized. This keeps
 /// agent-console.log as valid JSON throughout.
+/// Also writes to /dev/kmsg so messages appear in dmesg.
 fn boot_log(level: &str, msg: &str) {
-    eprintln!("{}", format_boot_log(level, msg));
+    let line = format_boot_log(level, msg);
+    eprintln!("{}", line);
+    // Mirror to /dev/kmsg so dmesg captures early-boot messages even when
+    // the console-log pipe isn't receiving eprintln! output.
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+            let _ = writeln!(f, "smolvm-agent: {}", line);
+        }
+    }
 }
 mod dns_proxy;
 mod network;
@@ -521,6 +532,27 @@ fn setup_gpu_dev_nodes() {
     }
 }
 
+/// Log whether the GPU is accessible in the guest.
+///
+/// Called at startup when `ENV_SMOLVM_GPU` is set. Checks whether the virtio-gpu
+/// render node appeared in `/dev/dri/` after `setup_gpu_dev_nodes` ran. If not,
+/// the kernel was built without `virtio-gpu` or `drm` support and the workload
+/// will fail at Vulkan/EGL init rather than here — log a clear warning so the
+/// user knows to check the kernel config.
+#[cfg(target_os = "linux")]
+fn log_gpu_status() {
+    let render_node = std::path::Path::new("/dev/dri/renderD128");
+    if render_node.exists() {
+        info!("GPU: virtio-gpu render node present at /dev/dri/renderD128");
+    } else {
+        warn!(
+            "GPU: requested but /dev/dri/renderD128 not found — \
+             the guest kernel may lack virtio-gpu/drm support; \
+             Vulkan/EGL workloads will fail"
+        );
+    }
+}
+
 /// Set up persistent rootfs overlay using overlayfs on /dev/vdb.
 ///
 /// If /dev/vdb exists (overlay disk attached by host), this function:
@@ -544,18 +576,54 @@ fn setup_persistent_rootfs() {
     const STORAGE_TEMP_MOUNT: &str = "/mnt/storage";
     const NEWROOT: &str = "/mnt/newroot";
 
-    // Make root mount private — required for mount --move and pivot_root.
-    // libkrun's init.c sets MS_SHARED; we override with MS_PRIVATE.
+    // pivot_root requires that the current root mount is NOT shared.
+    // The kernel mounts virtiofs as shared:1 by default.  We must make it
+    // private before pivot_root will accept it.
+    //
+    // Strategy:
+    // 1. Try MS_PRIVATE|MS_REC directly (works if CAP_SYS_ADMIN + not locked).
+    // 2. If that fails, unshare the mount namespace first (creates a private
+    //    copy of the namespace for this process), then retry.
     let root = cstr("/");
-    // SAFETY: mount with MS_PRIVATE|MS_REC on root, no filesystem type
-    unsafe {
+    // SAFETY: mount with MS_PRIVATE|MS_REC on root — no fstype needed
+    let ms_private_ret = unsafe {
         libc::mount(
             std::ptr::null(),
             root.as_ptr(),
             std::ptr::null(),
             libc::MS_PRIVATE | libc::MS_REC,
             std::ptr::null(),
+        )
+    };
+    if ms_private_ret != 0 {
+        boot_log(
+            "WARN",
+            &format!(
+                "MS_PRIVATE on / failed ({}), trying unshare",
+                std::io::Error::last_os_error()
+            ),
         );
+        // SAFETY: unshare mount namespace so we get a private copy
+        let unshare_ret = unsafe { libc::unshare(libc::CLONE_NEWNS) };
+        if unshare_ret != 0 {
+            boot_log(
+                "WARN",
+                &format!(
+                    "unshare(CLONE_NEWNS) failed ({}), pivot_root may fail",
+                    std::io::Error::last_os_error()
+                ),
+            );
+        }
+        // Retry MS_PRIVATE after unshare (now we own the namespace)
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                root.as_ptr(),
+                std::ptr::null(),
+                libc::MS_PRIVATE | libc::MS_REC,
+                std::ptr::null(),
+            );
+        }
     }
 
     // If overlay device doesn't exist, no overlay disk attached — skip.
@@ -698,7 +766,7 @@ fn setup_persistent_rootfs() {
     };
     if result != 0 {
         let err = std::io::Error::last_os_error();
-        boot_log("ERROR", &format!("failed to mount overlayfs: {}", err));
+        boot_log("ERROR", &format!("failed to mount overlayfs ({})", err));
         // Clean up parallel storage mount to avoid double-mount in
         // mount_storage_disk() fallback path.
         if let Some(handle) = storage_handle {
@@ -711,6 +779,19 @@ fn setup_persistent_rootfs() {
             }
         }
         return;
+    }
+
+    // pivot_root also requires the new root mount not to be shared.
+    // Make the overlayfs mount private immediately after creating it.
+    // SAFETY: mount(NULL, newroot, NULL, MS_PRIVATE|MS_REC, NULL)
+    unsafe {
+        libc::mount(
+            std::ptr::null(),
+            newroot.as_ptr(),
+            std::ptr::null(),
+            libc::MS_PRIVATE | libc::MS_REC,
+            std::ptr::null(),
+        );
     }
 
     // Create mount point directories in new root and move special mounts
@@ -797,6 +878,8 @@ fn setup_persistent_rootfs() {
 
     // Set working directory to new root
     let _ = std::env::set_current_dir("/");
+
+    boot_log("INFO", "persistent rootfs overlay active (pivot_root done)");
 }
 
 /// Stub for non-Linux platforms.

@@ -1,0 +1,58 @@
+# Headless Chromium with GPU acceleration
+#
+# Guest Vulkan (Venus/virtio-gpu) forwards calls over the virtio-gpu transport
+# to the host GPU.  ANGLE inside Chromium uses Venus as its Vulkan backend, so
+# WebGL and compositing run on real hardware — no SwiftShader fallback.
+#
+# Confirmed GL renderer:
+#   ANGLE (Intel, Vulkan 1.4.307 (Virtio-GPU Venus (Intel(R) UHD Graphics 620
+#          (KBL GT2)) (0x00005917)), venus)
+#
+# ── Setup (one time) ─────────────────────────────────────────────────────────
+#
+#   smolvm machine create browser -s examples/headless-browser/browser.smolfile
+#   smolvm machine start --name browser
+#
+# ── Take a screenshot ────────────────────────────────────────────────────────
+#
+#   smolvm machine exec --name browser -- \
+#     chromium --headless=new --no-sandbox --disable-dev-shm-usage \
+#       --use-gl=angle --use-angle=vulkan \
+#       --screenshot=/tmp/out.png --window-size=1280,800 \
+#       https://example.com
+#
+#   # Copy screenshot to host
+#   smolvm machine exec --name browser -- base64 /tmp/out.png | base64 -d > out.png
+#
+# ── Verify GPU renderer ───────────────────────────────────────────────────────
+#
+#   smolvm machine exec --name browser -- sh -c '
+#     vulkaninfo --summary 2>/dev/null | grep deviceName
+#   '
+#   # → deviceName = Virtio-GPU Venus (Intel(R) UHD Graphics 620 ...)
+#
+# ── Stop ─────────────────────────────────────────────────────────────────────
+#
+#   smolvm machine stop --name browser
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+image = "alpine:3.21"
+
+cpus = 4
+memory = 4096
+gpu = true
+gpu_vram = 2048
+net = true
+
+# Venus Vulkan ICD must be visible to Chromium's bundled Vulkan loader.
+env = [
+    "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json",
+]
+
+[dev]
+# Install Chromium and the Mesa Venus Vulkan driver.
+# apk is idempotent — subsequent starts skip packages already on disk.
+init = [
+    "apk add --no-cache chromium chromium-angle mesa-vulkan-virtio vulkan-loader font-opensans",
+]

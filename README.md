@@ -151,7 +151,57 @@ Known Limitations
 * Volume mounts: directories only (no single files).
 * macOS: binary must be signed with Hypervisor.framework entitlements.
 * `--ssh-agent` requires an SSH agent running on the host (`SSH_AUTH_SOCK` must be set).
-* GPU support is currently being worked on [in a separate branch](https://github.com/smol-machines/smolvm/tree/binbin-gpu-support).
+* GPU acceleration requires libkrun built with `GPU=1` and virglrenderer + a Vulkan driver on the host (see [GPU Acceleration](#gpu-acceleration) below).
+
+GPU Acceleration
+----------------
+
+smolvm exposes the host GPU to guests via **virtio-gpu / Venus** (Vulkan-over-virtio). Guest workloads see a real Vulkan device; on Linux + Intel this renders as:
+
+```
+ANGLE (Intel, Vulkan 1.4 (Virtio-GPU Venus (Intel(R) UHD Graphics ...)), venus)
+```
+
+### Host requirements
+
+libkrun must be built with GPU support:
+
+```bash
+# Linux
+make BLK=1 NET=1 GPU=1
+
+# macOS (also needs MoltenVK)
+make BLK=1 NET=1 GPU=1 TIMESYNC=1
+```
+
+Host system packages required at runtime:
+
+| Distro | Packages |
+|--------|----------|
+| Alpine | `apk add virglrenderer mesa-vulkan-virtio` |
+| Debian/Ubuntu | `apt install virglrenderer0 mesa-vulkan-drivers` |
+| macOS | `brew install virglrenderer molten-vk` |
+
+### Usage
+
+```bash
+# CLI
+smolvm machine run --gpu --image alpine -- vulkaninfo --summary
+
+# Smolfile
+# gpu = true
+# gpu_vram = 2048   # MiB, default 4096
+```
+
+The guest Vulkan loader must be pointed at the virtio ICD:
+
+```bash
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json
+```
+
+### Headless browser example
+
+See [`examples/headless-browser/`](examples/headless-browser/) for a working Chromium setup using ANGLE + Venus for hardware-accelerated WebGL inside a headless VM.
 
 Development
 -----------

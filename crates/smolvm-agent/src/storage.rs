@@ -44,6 +44,13 @@ fn validate_storage_id(value: &str, context: &str) -> Result<()> {
         });
     }
 
+    if value.contains('/') || value.contains('\\') {
+        return Err(StorageError::ValidationFailed {
+            context: context.to_string(),
+            reason: "path separators are not allowed".to_string(),
+        });
+    }
+
     let path = Path::new(value);
     for component in path.components() {
         match component {

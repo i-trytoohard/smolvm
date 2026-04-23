@@ -23,8 +23,7 @@ pub fn parse_gpu_vram_mib(s: &str) -> Result<u32, String> {
     let v: u32 = s
         .parse()
         .map_err(|_| format!("'{}' is not a valid MiB value", s))?;
-    smolvm::data::resources::validate_gpu_vram_mib(Some(v))
-        .map_err(|e| e.to_string())?;
+    smolvm::data::resources::validate_gpu_vram_mib(Some(v)).map_err(|e| e.to_string())?;
     Ok(v)
 }
 

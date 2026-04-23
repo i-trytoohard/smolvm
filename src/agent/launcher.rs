@@ -68,14 +68,31 @@ extern "C" {
     fn krun_add_vsock(ctx: u32, tsi_features: u32) -> i32;
 }
 
-/// Dynamically resolve krun_set_gpu_options2 at runtime via dlsym.
-/// Returns None if libkrun was built without GPU support.
+/// Dynamically resolve `krun_set_gpu_options2` at runtime via dlsym.
+///
+/// Returns `None` when libkrun was built without the `gpu` feature (the symbol
+/// is absent from the binary). Callers must treat `None` as a hard error and
+/// surface a clear message — GPU cannot be emulated in software.
+///
+/// # Build requirements
+///
+/// libkrun must be compiled with `GPU=1`:
+///
+/// ```text
+/// Linux:  make BLK=1 NET=1 GPU=1
+/// macOS:  make BLK=1 NET=1 GPU=1 TIMESYNC=1
+/// ```
+///
+/// At runtime the host also needs virglrenderer and a Vulkan driver installed.
+/// See the project README for platform-specific package names.
 unsafe fn resolve_krun_set_gpu_options2() -> Option<unsafe extern "C" fn(u32, u32, u64) -> i32> {
     let name = c"krun_set_gpu_options2";
     let ptr = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
     if ptr.is_null() {
         None
     } else {
+        // ABI: krun_set_gpu_options2(ctx_id: u32, virgl_flags: u32, shm_size: u64) -> i32
+        // Source: libkrun/include/libkrun.h:609-611
         Some(std::mem::transmute::<
             *mut libc::c_void,
             unsafe extern "C" fn(u32, u32, u64) -> i32,
@@ -83,11 +100,29 @@ unsafe fn resolve_krun_set_gpu_options2() -> Option<unsafe extern "C" fn(u32, u3
     }
 }
 
-// virglrenderer flags for krun_set_gpu_options.
+// virglrenderer flags for krun_set_gpu_options2.
+// Flag values from libkrun/include/libkrun.h:573-584 (virglrenderer bindings).
+//
 // Venus provides Vulkan inside the guest via virtio-gpu transport.
-// On macOS, Venus → MoltenVK → Metal gives near-native GPU access.
+//
+// Linux: EGL + surfaceless lets virglrenderer create a Vulkan device without a
+// display server.  RENDER_SERVER tells virglrenderer to call get_server_fd and
+// communicate with the virgl_render_server subprocess for Venus Vulkan; without
+// it virglrenderer ignores the render-server socket and vkEnumeratePhysicalDevices
+// returns 0 physical devices.  RENDER_SERVER is Linux-only because the render
+// server subprocess is only spawned on Linux (see virtio_gpu.rs:367,
+// #[cfg(target_os = "linux")]); on other platforms render_server_fd is always
+// None and get_server_fd would return -1.
+//
+// macOS: Venus uses MoltenVK directly (not EGL), so EGL and RENDER_SERVER are
+// omitted.
+#[cfg(target_os = "linux")]
+const VIRGLRENDERER_USE_EGL: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
+const VIRGLRENDERER_USE_SURFACELESS: u32 = 1 << 3;
 const VIRGLRENDERER_VENUS: u32 = 1 << 6;
-const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
+#[cfg(target_os = "linux")]
+const VIRGLRENDERER_RENDER_SERVER: u32 = 1 << 9;
 
 /// Find the directory containing libkrunfw by checking explicit overrides and
 /// paths relative to the current executable.
@@ -272,11 +307,21 @@ pub fn launch_agent_vm(config: &LaunchConfig<'_>) -> Result<()> {
             return Err(Error::agent("configure vm", "krun_set_vm_config failed"));
         }
 
-        // Enable GPU if requested (Venus for Vulkan via virtio-gpu).
+        // Enable GPU if requested (virgl for OpenGL + Venus for Vulkan via virtio-gpu).
         // Requires libkrun built with `gpu` feature and host virglrenderer.
         // On macOS, also requires MoltenVK (Vulkan → Metal translation).
+        // VIRGLRENDERER_NO_VIRGL is intentionally omitted — virgl3D (OpenGL) must
+        // remain enabled alongside Venus so the guest virtio_gpu_dri.so driver can
+        // create rendering contexts.  Without it, DRI2 screen creation fails with
+        // VIRTIO_GPU_RESP_ERR_UNSPEC and EGL falls back to software (kms_swrast).
         if resources.gpu {
-            let virgl_flags = VIRGLRENDERER_VENUS | VIRGLRENDERER_NO_VIRGL;
+            #[cfg(target_os = "linux")]
+            let virgl_flags = VIRGLRENDERER_USE_EGL
+                | VIRGLRENDERER_USE_SURFACELESS
+                | VIRGLRENDERER_VENUS
+                | VIRGLRENDERER_RENDER_SERVER;
+            #[cfg(not(target_os = "linux"))]
+            let virgl_flags = VIRGLRENDERER_VENUS;
             // Size the GPU shared-memory region. Caller may override
             // via `--gpu-vram <MiB>` (CLI) or `gpu_vram = N` (Smolfile);
             // default is `DEFAULT_GPU_VRAM_MIB`.
@@ -289,19 +334,10 @@ pub fn launch_agent_vm(config: &LaunchConfig<'_>) -> Result<()> {
                 Some(f) => f,
                 None => {
                     krun_free_ctx(ctx);
-                    let install_hint = if cfg!(target_os = "macos") {
-                        "Install GPU dependencies with:\n  brew install virglrenderer molten-vk\n\n\
-                         Then rebuild libkrun with: make BLK=1 NET=1 GPU=1 TIMESYNC=1"
-                    } else {
-                        "Install GPU dependencies with:\n  apt install virglrenderer0 mesa-vulkan-drivers\n\n\
-                         Then rebuild libkrun with: make BLK=1 NET=1 GPU=1"
-                    };
                     return Err(Error::agent(
                         "configure gpu",
-                        format!(
-                            "GPU not available: libkrun was built without GPU support.\n\n{}",
-                            install_hint
-                        ),
+                        "libkrun was built without GPU support (krun_set_gpu_options2 not found). \
+                         Rebuild libkrun with GPU=1 — see project README for details.",
                     ));
                 }
             };
