@@ -205,6 +205,8 @@ if [[ "$WITH_LOCAL_LIBKRUN" == "1" ]]; then
     copy_matching_libraries "$BASE_LIB_DIR" "libvirglrenderer*" "$LOCAL_BUNDLE_DIR"
     copy_matching_libraries "$BASE_LIB_DIR" "libMoltenVK*" "$LOCAL_BUNDLE_DIR"
     copy_matching_libraries "$BASE_LIB_DIR" "libepoxy*" "$LOCAL_BUNDLE_DIR"
+    # Linux render server binary (required for Venus Vulkan).
+    [[ -f "$BASE_LIB_DIR/virgl_render_server" ]] && cp "$BASE_LIB_DIR/virgl_render_server" "$LOCAL_BUNDLE_DIR/"
     WORK_LIB_DIR="$LOCAL_BUNDLE_DIR"
     echo "Staging local build bundle in $WORK_LIB_DIR"
 fi
@@ -349,9 +351,16 @@ else
     copy_so_with_symlinks libkrunfw required
 
     # Bundle GPU rendering libraries if present (virglrenderer chain for Venus/Vulkan).
-    for gpu_lib_prefix in libvirglrenderer libMoltenVK libepoxy; do
+    # libMoltenVK is macOS-only — not included here.
+    for gpu_lib_prefix in libvirglrenderer libepoxy; do
         copy_so_with_symlinks "$gpu_lib_prefix" optional
     done
+    # Bundle render server binary (required for Venus Vulkan on Linux).
+    if [[ -f "$WORK_LIB_DIR/virgl_render_server" ]]; then
+        cp "$WORK_LIB_DIR/virgl_render_server" "$DIST_DIR/lib/"
+        chmod +x "$DIST_DIR/lib/virgl_render_server"
+        echo "Bundled: virgl_render_server ($(du -h "$DIST_DIR/lib/virgl_render_server" | cut -f1))"
+    fi
 fi
 
 # Copy init.krun for Linux (required by libkrunfw kernel)

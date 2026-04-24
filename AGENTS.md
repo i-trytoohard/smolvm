@@ -230,6 +230,12 @@ Requires `SSH_AUTH_SOCK` to be set on the host. If missing, smolvm exits with an
 
 Enable the host GPU inside a VM with `--gpu`. Guest Vulkan talks to the host GPU via virtio-gpu/Venus; ANGLE uses it as the WebGL/OpenGL ES backend.
 
+**Host setup:**
+- macOS — bundled, no extra installs needed.
+- Linux — install virglrenderer from the system package manager before use:
+  - Alpine: `apk add virglrenderer mesa-vulkan-intel` (or `mesa-vulkan-ati` for AMD)
+  - Debian/Ubuntu: `apt install virglrenderer0 mesa-vulkan-drivers`
+
 ```bash
 # One-shot GPU workload
 smolvm machine run --gpu --image alpine -- sh -c '

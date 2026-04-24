@@ -173,6 +173,34 @@ pub fn find_lib_dir() -> Option<PathBuf> {
     None
 }
 
+/// Load a single library into the global symbol namespace via `dlopen(RTLD_GLOBAL)`.
+///
+/// Makes the library visible to all subsequent `dlopen` calls by soname, without
+/// requiring `LD_LIBRARY_PATH` (which glibc caches at process startup and never re-reads).
+/// The handle is intentionally leaked — the library must remain resident.
+///
+/// Returns `true` if the library was loaded successfully.
+fn dlopen_global(path: &Path) -> bool {
+    let Ok(path_c) = CString::new(path.to_string_lossy().as_bytes()) else {
+        return false;
+    };
+    unsafe {
+        let handle = libc::dlopen(path_c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            let err = libc::dlerror();
+            let msg = if err.is_null() {
+                "unknown error".to_string()
+            } else {
+                CStr::from_ptr(err).to_string_lossy().to_string()
+            };
+            tracing::warn!(path = %path.display(), error = %msg, "failed to preload library");
+            return false;
+        }
+        // Intentionally leak — library must stay loaded.
+        true
+    }
+}
+
 /// Preload libkrunfw with `RTLD_GLOBAL` so libkrun's internal `dlopen("libkrunfw.so.5")` finds it.
 ///
 /// Setting `LD_LIBRARY_PATH` via `std::env::set_var` is insufficient because glibc caches
@@ -186,24 +214,39 @@ fn preload_libkrunfw() {
     let Some(lib_dir) = find_lib_dir() else {
         return;
     };
+    dlopen_global(&lib_dir.join(libkrunfw_filename()));
+}
 
-    let lib_path = lib_dir.join(libkrunfw_filename());
-    let Ok(lib_path_c) = CString::new(lib_path.to_string_lossy().as_bytes()) else {
+/// Preload bundled libepoxy and libvirglrenderer with `RTLD_GLOBAL` so libkrun's
+/// virglrenderer usage resolves them before searching system library paths.
+/// Also sets `VIRGL_RENDER_SERVER_PATH` to the bundled render server binary if present.
+///
+/// `virtio_gpu.rs` reads `VIRGL_RENDER_SERVER_PATH` via `env::var` in the same process,
+/// so `set_var` here wires the bundled path without modifying libkrun source.
+///
+/// No-op if libvirglrenderer is not found in the bundled lib dir (falls back to system install).
+#[cfg(target_os = "linux")]
+fn preload_libvirglrenderer() {
+    let Some(lib_dir) = find_lib_dir() else {
         return;
     };
 
-    unsafe {
-        let handle = libc::dlopen(lib_path_c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
-        if handle.is_null() {
-            let err = libc::dlerror();
-            let err_msg = if err.is_null() {
-                "unknown error".to_string()
-            } else {
-                CStr::from_ptr(err).to_string_lossy().to_string()
-            };
-            tracing::warn!(path = %lib_path.display(), error = %err_msg, "failed to preload libkrunfw");
+    // libepoxy must be loaded before libvirglrenderer (it's a runtime dependency).
+    for lib_name in &["libepoxy.so.0", "libvirglrenderer.so.1"] {
+        let path = lib_dir.join(lib_name);
+        if path.exists() {
+            dlopen_global(&path);
         }
-        // Intentionally leak the handle — libkrunfw must stay loaded for libkrun to use it.
+    }
+
+    // Point libkrun at the bundled render server subprocess.
+    // set_var is safe here: this runs in the single-threaded child process after fork.
+    let server = lib_dir.join("virgl_render_server");
+    if server.exists() && std::env::var("VIRGL_RENDER_SERVER_PATH").is_err() {
+        if let Some(s) = server.to_str() {
+            #[allow(deprecated)]
+            std::env::set_var("VIRGL_RENDER_SERVER_PATH", s);
+        }
     }
 }
 
@@ -288,6 +331,10 @@ pub fn launch_agent_vm(config: &LaunchConfig<'_>) -> Result<()> {
 
     // Raise file descriptor limits
     raise_fd_limits();
+
+    // Preload bundled virglrenderer libs and wire the render server path.
+    #[cfg(target_os = "linux")]
+    preload_libvirglrenderer();
 
     // Preload libkrunfw so libkrun's internal dlopen can find it
     preload_libkrunfw();

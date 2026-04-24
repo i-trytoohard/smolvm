@@ -73,16 +73,17 @@ impl AssetCollector {
 
     /// Discover and copy runtime libraries from the given lib directory.
     ///
-    /// Looks for:
-    /// - libkrun.dylib (macOS) or libkrun.so (Linux)
-    /// - libkrunfw.5.dylib (macOS) or libkrunfw.so.5 (Linux)
+    /// Always copies:
+    /// - libkrun.dylib / libkrun.so — VM runtime
+    /// - libkrunfw.5.dylib / libkrunfw.so.5 — kernel firmware
     ///
-    /// On macOS, also includes the virglrenderer chain when present:
-    /// - libvirglrenderer.1.dylib, libMoltenVK.dylib, libepoxy.0.dylib
+    /// Copies when present (GPU passthrough for `gpu = true` guests):
+    /// - macOS: libvirglrenderer.1.dylib, libMoltenVK.dylib, libepoxy.0.dylib
+    /// - Linux: libvirglrenderer.so.1, libepoxy.so.0, virgl_render_server binary
     ///
-    /// These enable GPU passthrough (virtio-gpu/Venus) for guests with `gpu = true`.
-    /// When bundled, loading them adds ~3ms overhead even for non-GPU workloads
-    /// (dylib load is unavoidable; virglrenderer init itself is deferred until GPU use).
+    /// GPU Vulkan ICDs (ANV, RADV) are hardware-specific and cannot be bundled.
+    /// When GPU libs are bundled, loading them adds ~3ms overhead even for non-GPU
+    /// workloads (lib load is unavoidable; virglrenderer init is deferred to GPU use).
     pub fn collect_libraries(&mut self, lib_dir: &Path) -> Result<()> {
         fs::create_dir_all(self.staging_dir.join("lib"))?;
 
@@ -133,6 +134,39 @@ impl AssetCollector {
                         size: metadata.len(),
                     });
                 }
+            }
+        }
+
+        // On Linux, bundle GPU rendering libraries and render server when present.
+        // virglrenderer + epoxy enable Venus/Vulkan via virtio-gpu.
+        // virgl_render_server is the subprocess libkrun spawns during Venus init.
+        // GPU Vulkan ICDs (ANV, RADV) are hardware-specific and cannot be bundled.
+        #[cfg(target_os = "linux")]
+        {
+            let gpu_libs = ["libvirglrenderer.so.1", "libepoxy.so.0"];
+            for name in &gpu_libs {
+                let src = lib_dir.join(name);
+                if src.exists() {
+                    let dst = self.staging_dir.join("lib").join(name);
+                    fs::copy(&src, &dst)?;
+                    let metadata = fs::metadata(&dst)?;
+                    self.inventory.libraries.push(AssetEntry {
+                        path: format!("lib/{}", name),
+                        size: metadata.len(),
+                    });
+                }
+            }
+            let server_src = lib_dir.join("virgl_render_server");
+            if server_src.exists() {
+                let server_dst = self.staging_dir.join("lib").join("virgl_render_server");
+                fs::copy(&server_src, &server_dst)?;
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&server_dst, fs::Permissions::from_mode(0o755))?;
+                let metadata = fs::metadata(&server_dst)?;
+                self.inventory.libraries.push(AssetEntry {
+                    path: "lib/virgl_render_server".to_string(),
+                    size: metadata.len(),
+                });
             }
         }
 

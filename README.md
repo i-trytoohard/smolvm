@@ -164,23 +164,16 @@ ANGLE (Intel, Vulkan 1.4 (Virtio-GPU Venus (Intel(R) UHD Graphics ...)), venus)
 
 ### Host requirements
 
-libkrun must be built with GPU support:
+**macOS** — virglrenderer and MoltenVK are bundled in the smolvm distribution. No extra installs needed.
 
-```bash
-# Linux
-make BLK=1 NET=1 GPU=1
-
-# macOS (also needs MoltenVK)
-make BLK=1 NET=1 GPU=1 TIMESYNC=1
-```
-
-Host system packages required at runtime:
+**Linux** — virglrenderer and a host Vulkan driver must be installed from the system package manager:
 
 | Distro | Packages |
 |--------|----------|
-| Alpine | `apk add virglrenderer mesa-vulkan-virtio` |
+| Alpine | `apk add virglrenderer mesa-vulkan-intel` (or `mesa-vulkan-ati` for AMD) |
 | Debian/Ubuntu | `apt install virglrenderer0 mesa-vulkan-drivers` |
-| macOS | `brew install virglrenderer molten-vk` |
+
+> virglrenderer depends on libEGL and libdrm from the host GPU driver stack — these are hardware-specific and cannot be bundled. Any GPU-capable Linux host will already have them installed via its GPU driver.
 
 ### Usage
 
