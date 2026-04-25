@@ -1220,6 +1220,12 @@ fn handle_connection(stream: &mut impl ReadWrite) -> Result<(), Box<dyn std::err
             continue;
         }
 
+        // Detached run — start container in background and return its container ID.
+        if let AgentRequest::Run { detached: true, .. } = &request {
+            handle_run_detached(stream, request)?;
+            continue;
+        }
+
         // Check if this is an interactive VM exec request
         if let AgentRequest::VmExec {
             interactive: true, ..
@@ -1482,6 +1488,7 @@ fn handle_request(
             timeout_ms,
             interactive: false,
             tty: false,
+            detached: false,
             persistent_overlay_id,
         } => handle_run(
             &image,
@@ -2236,6 +2243,7 @@ fn handle_interactive_run(
         user.as_deref(),
         &mounts,
         tty,
+        persistent_overlay_id.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -2277,6 +2285,349 @@ fn handle_interactive_run(
     Ok(())
 }
 
+/// Write an OCI bundle (`config.json`) and return a freshly generated container ID.
+///
+/// Shared by [`handle_run_detached`] and [`spawn_interactive_command`] to avoid
+/// duplicating the identity-resolve → spec-build → mount-wiring → write sequence.
+/// The only caller-controlled variation is `tty` (detached: always `false`).
+#[cfg(target_os = "linux")]
+fn write_oci_bundle(
+    rootfs_path: &std::path::Path,
+    bundle_path: &std::path::Path,
+    command: &[String],
+    env: &[(String, String)],
+    workdir: Option<&str>,
+    user: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tty: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::path::Path;
+
+    let workdir_str = workdir.unwrap_or("/");
+    let identity = oci::resolve_process_identity(rootfs_path, user)?;
+    let mut spec = oci::OciSpec::new(command, env, workdir_str, tty, &identity);
+
+    for (tag, container_path, read_only) in mounts {
+        let virtiofs_mount = Path::new(paths::VIRTIOFS_MOUNT_ROOT).join(tag);
+        spec.add_bind_mount(
+            &virtiofs_mount.to_string_lossy(),
+            container_path,
+            *read_only,
+        );
+    }
+
+    // Shared workspace: /storage/workspace → /workspace inside container.
+    let workspace_src = Path::new("/storage/workspace");
+    if workspace_src.exists() {
+        spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
+    }
+
+    ssh_agent::inject_into_container(&mut spec);
+    spec.write_to(bundle_path)
+        .map_err(|e| format!("failed to write OCI spec: {}", e))?;
+
+    Ok(oci::generate_container_id())
+}
+
+/// Handle a detached run request: start a container in the background and
+/// return its container ID to the caller.
+///
+/// The container ID is saved to `main_container_id_path(workload_id)` so that
+/// subsequent `machine exec` calls can join the container via `crun exec`
+/// instead of creating a new isolated container.
+///
+/// Requires `persistent_overlay_id` to be set — detached containers must
+/// persist across exec sessions, which requires a named overlay.
+#[cfg(target_os = "linux")]
+fn handle_run_detached(
+    stream: &mut impl ReadWrite,
+    request: AgentRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::path::Path;
+
+    ensure_storage_mounted();
+
+    let (image, command, env, workdir, user, mounts, persistent_overlay_id) = match request {
+        AgentRequest::Run {
+            image,
+            command,
+            env,
+            workdir,
+            user,
+            mounts,
+            persistent_overlay_id,
+            ..
+        } => (
+            image,
+            command,
+            env,
+            workdir,
+            user,
+            mounts,
+            persistent_overlay_id,
+        ),
+        _ => {
+            send_response(
+                stream,
+                &AgentResponse::error("expected Run request", error_codes::INVALID_REQUEST),
+            )?;
+            return Ok(());
+        }
+    };
+
+    // Validate inputs before creating any overlay state.
+    if command.is_empty() {
+        send_response(
+            stream,
+            &AgentResponse::error("empty command", error_codes::INVALID_REQUEST),
+        )?;
+        return Ok(());
+    }
+
+    let overlay_id = match persistent_overlay_id {
+        Some(id) => id,
+        None => {
+            send_response(
+                stream,
+                &AgentResponse::error(
+                    "detached mode requires persistent_overlay_id",
+                    error_codes::INVALID_REQUEST,
+                ),
+            )?;
+            return Ok(());
+        }
+    };
+
+    info!(
+        image = %image,
+        command = ?command,
+        overlay_id = %overlay_id,
+        "starting detached container"
+    );
+
+    let prepared = match storage::prepare_for_run_persistent(&image, &overlay_id) {
+        Ok(p) => p,
+        Err(e) => {
+            send_response(stream, &AgentResponse::from_err(e, error_codes::RUN_FAILED))?;
+            return Ok(());
+        }
+    };
+
+    if let Err(e) = storage::setup_mounts(&prepared.rootfs_path, &mounts) {
+        send_response(
+            stream,
+            &AgentResponse::from_err(e, error_codes::MOUNT_FAILED),
+        )?;
+        return Ok(());
+    }
+
+    let rootfs_path = Path::new(&prepared.rootfs_path);
+    let bundle_path = match rootfs_path.parent() {
+        Some(p) => p.join("bundle"),
+        None => {
+            send_response(
+                stream,
+                &AgentResponse::error(
+                    "invalid rootfs path: no parent",
+                    error_codes::INTERNAL_ERROR,
+                ),
+            )?;
+            return Ok(());
+        }
+    };
+
+    if !bundle_path.exists() {
+        send_response(
+            stream,
+            &AgentResponse::error(
+                format!("bundle directory not found: {}", bundle_path.display()),
+                error_codes::INTERNAL_ERROR,
+            ),
+        )?;
+        return Ok(());
+    }
+
+    let workload_id = format!("persistent-{}", overlay_id);
+
+    // Detached containers always run non-interactively (tty: false).
+    let container_id = match write_oci_bundle(
+        rootfs_path,
+        &bundle_path,
+        &command,
+        &env,
+        workdir.as_deref(),
+        user.as_deref(),
+        &mounts,
+        false,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            send_response(
+                stream,
+                &AgentResponse::from_err(e, error_codes::INTERNAL_ERROR),
+            )?;
+            return Ok(());
+        }
+    };
+
+    info!(
+        container_id = %container_id,
+        workload_id = %workload_id,
+        "running detached container"
+    );
+
+    match crun::CrunCommand::run_detach(&bundle_path, &container_id).status() {
+        Ok(status) if status.success() => {
+            // Save the container ID so subsequent execs join this container.
+            let id_path = paths::main_container_id_path(&workload_id);
+            let _ = std::fs::write(&id_path, container_id.as_bytes());
+            info!(
+                container_id = %container_id,
+                "detached container started, saved main_container_id"
+            );
+            send_response(
+                stream,
+                &AgentResponse::Completed {
+                    exit_code: 0,
+                    stdout: container_id.into_bytes(),
+                    stderr: vec![],
+                },
+            )?;
+        }
+        Ok(status) => {
+            let code = status.code().unwrap_or(-1);
+            send_response(
+                stream,
+                &AgentResponse::error(
+                    format!("crun run --detach failed with exit code {}", code),
+                    error_codes::RUN_FAILED,
+                ),
+            )?;
+        }
+        Err(e) => {
+            send_response(
+                stream,
+                &AgentResponse::from_err(e, error_codes::SPAWN_FAILED),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Non-Linux stub: the agent only runs on Linux; this exists so the host-side
+/// `cargo check` on macOS compiles the dispatch in `handle_connection`.
+#[cfg(not(target_os = "linux"))]
+fn handle_run_detached(
+    stream: &mut impl ReadWrite,
+    _request: AgentRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    send_response(
+        stream,
+        &AgentResponse::error(
+            "detached mode not supported on this platform",
+            error_codes::INTERNAL_ERROR,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Check whether a crun container is currently running by querying `crun state`
+/// and verifying the PID is still alive.
+///
+/// Returns `false` on any error (missing state files, parse failures, etc.)
+/// so callers fall through to starting a fresh container.
+#[cfg(target_os = "linux")]
+fn is_container_running(container_id: &str) -> bool {
+    let output = match crun::CrunCommand::state(container_id)
+        .capture_output()
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let v: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let is_running = v
+        .get("status")
+        .and_then(|s| s.as_str())
+        .map(|s| s == "running")
+        .unwrap_or(false);
+    if !is_running {
+        return false;
+    }
+
+    let pid = v.get("pid").and_then(|p| p.as_i64()).unwrap_or(0);
+    if pid <= 0 {
+        return false;
+    }
+
+    // kill(pid, 0) checks process existence without sending a signal.
+    // Handles stale "running" state left after SIGKILL of a container.
+    // SAFETY: signal 0 never terminates a process; checks existence only.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// Non-Linux stub.
+#[cfg(not(target_os = "linux"))]
+fn is_container_running(_container_id: &str) -> bool {
+    false
+}
+
+/// Spawn a command by joining a running container via `crun exec`.
+///
+/// Used when a main workload container is already running for this overlay —
+/// the new command joins its existing PID/mount/cgroup namespaces rather than
+/// creating an isolated new container.
+#[cfg(target_os = "linux")]
+fn spawn_exec_in_container(
+    container_id: &str,
+    command: &[String],
+    env: &[(String, String)],
+    workdir: Option<&str>,
+    tty: bool,
+) -> Result<(Child, Option<pty::PtyMaster>), Box<dyn std::error::Error>> {
+    use std::os::unix::io::AsRawFd as _;
+
+    info!(
+        container_id = %container_id,
+        command = ?command,
+        tty = tty,
+        "joining running container via crun exec"
+    );
+
+    if tty {
+        let (pty_master, slave_fd) = pty::open_pty(80, 24)?;
+        let slave_raw = slave_fd.as_raw_fd();
+        // SAFETY: slave_fd is a valid open fd from openpty.
+        let child = unsafe {
+            crun::CrunCommand::exec(container_id, env, command, workdir, true)
+                .stdin_from_fd(libc::dup(slave_raw))
+                .stdout_from_fd(libc::dup(slave_raw))
+                .stderr_from_fd(libc::dup(slave_raw))
+                .spawn()?
+        };
+        drop(slave_fd);
+        Ok((child, Some(pty_master)))
+    } else {
+        let child = crun::CrunCommand::exec(container_id, env, command, workdir, false)
+            .stdin_piped()
+            .capture_output()
+            .spawn()?;
+        Ok((child, None))
+    }
+}
+
 /// Spawn a command for interactive execution using crun OCI runtime.
 ///
 /// When `tty` is true, allocates a PTY pair and attaches the slave to crun's
@@ -2292,12 +2643,31 @@ fn spawn_interactive_command(
     user: Option<&str>,
     mounts: &[(String, String, bool)],
     tty: bool,
+    persistent_overlay_id: Option<&str>,
 ) -> Result<(Child, Option<pty::PtyMaster>), Box<dyn std::error::Error>> {
     use std::os::unix::io::AsRawFd as _;
     use std::path::Path;
 
     if command.is_empty() {
         return Err("empty command".into());
+    }
+
+    // Probe: if a main workload container is already running for this overlay,
+    // join it via crun exec so all execs share the same PID/mount namespaces.
+    if let Some(overlay_id) = persistent_overlay_id {
+        let workload_id = format!("persistent-{}", overlay_id);
+        if let Ok(cid) = std::fs::read_to_string(paths::main_container_id_path(&workload_id)) {
+            let cid = cid.trim().to_string();
+            if !cid.is_empty() && is_container_running(&cid) {
+                return spawn_exec_in_container(&cid, command, env, workdir, tty);
+            }
+            // Dead or stale — fall through to fresh crun run.
+            if cid.is_empty() {
+                info!("no main container ID on record, starting fresh");
+            } else {
+                info!(container_id = %cid, "main container not running, starting fresh");
+            }
+        }
     }
 
     let rootfs_path = Path::new(rootfs);
@@ -2310,33 +2680,29 @@ fn spawn_interactive_command(
         return Err(format!("bundle directory not found: {}", bundle_path.display()).into());
     }
 
-    let workdir_str = workdir.unwrap_or("/");
-    // terminal: true tells crun to set up a controlling terminal (setsid + TIOCSCTTY)
-    let identity = oci::resolve_process_identity(rootfs_path, user)?;
-    let mut spec = oci::OciSpec::new(command, env, workdir_str, tty, &identity);
+    // Build the OCI bundle (config.json) and get a fresh container ID.
+    // When tty=true, the spec sets terminal:true so crun handles setsid + TIOCSCTTY.
+    let container_id = write_oci_bundle(
+        rootfs_path,
+        &bundle_path,
+        command,
+        env,
+        workdir,
+        user,
+        mounts,
+        tty,
+    )?;
 
-    for (tag, container_path, read_only) in mounts {
-        let virtiofs_mount = Path::new(paths::VIRTIOFS_MOUNT_ROOT).join(tag);
-        spec.add_bind_mount(
-            &virtiofs_mount.to_string_lossy(),
-            container_path,
-            *read_only,
+    // Persist the container ID so subsequent execs join this container.
+    // Written before spawn: if spawn fails the ID is stale, but
+    // is_container_running() will return false and the next exec starts fresh.
+    if let Some(overlay_id) = persistent_overlay_id {
+        let workload_id = format!("persistent-{}", overlay_id);
+        let _ = std::fs::write(
+            paths::main_container_id_path(&workload_id),
+            container_id.as_bytes(),
         );
     }
-
-    // Shared workspace: /storage/workspace → /workspace inside container
-    let workspace_src = std::path::Path::new("/storage/workspace");
-    if workspace_src.exists() {
-        spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
-    }
-
-    // Forward SSH agent into the container if enabled at boot.
-    ssh_agent::inject_into_container(&mut spec);
-
-    spec.write_to(&bundle_path)
-        .map_err(|e| format!("failed to write OCI spec: {}", e))?;
-
-    let container_id = oci::generate_container_id();
 
     info!(
         command = ?command,
@@ -2386,6 +2752,7 @@ fn spawn_interactive_command(
     user: Option<&str>,
     mounts: &[(String, String, bool)],
     _tty: bool,
+    _persistent_overlay_id: Option<&str>,
 ) -> Result<(Child, Option<()>), Box<dyn std::error::Error>> {
     use std::path::Path;
 

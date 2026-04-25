@@ -585,6 +585,36 @@ impl RunCmd {
                     }
                 }
 
+                // If the user supplied a non-idle command, start it as the
+                // main workload container so subsequent `machine exec` calls
+                // join its namespaces via `crun exec`.
+                let is_idle = command.is_empty()
+                    || command
+                        == DEFAULT_IDLE_CMD
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>();
+                if !is_idle {
+                    let run_config = smolvm::agent::RunConfig::new(img.clone(), command.clone())
+                        .with_env(defaults.env.clone())
+                        .with_workdir(defaults.workdir.clone())
+                        .with_user(defaults.user.clone())
+                        .with_mounts(mount_bindings.clone())
+                        // "default" matches what ExecCmd uses when no --name is given,
+                        // ensuring exec joins the container started here.
+                        .with_persistent_overlay(Some("default".to_string()));
+                    match client.run_container_detached(run_config) {
+                        Ok(cid) => {
+                            tracing::info!(container_id = %cid, "main workload container started");
+                        }
+                        Err(e) => {
+                            // Non-fatal: the VM is still usable; the next exec
+                            // will start a fresh container if needed.
+                            tracing::warn!(error = %e, "failed to start main workload container");
+                        }
+                    }
+                }
+
                 // Disarm SIGINT guard — detaching, VM stays running.
                 drop(sigint_guard);
 

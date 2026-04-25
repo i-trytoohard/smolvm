@@ -89,6 +89,15 @@ pub fn find_lib_dir() -> Option<PathBuf> {
         );
     }
 
+    // Compile-time baked path (most reliable for dev builds — absolute path
+    // embedded by build.rs at cargo build time, survives binary relocation).
+    if let Some(bundled_dir) = option_env!("SMOLVM_BUNDLED_LIB_DIR") {
+        let path = PathBuf::from(bundled_dir);
+        if path.join(lib_name).exists() {
+            return path.canonicalize().ok().or(Some(path));
+        }
+    }
+
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 

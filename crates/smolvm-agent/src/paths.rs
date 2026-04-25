@@ -94,6 +94,12 @@ pub fn bundle_dir(workload_id: &str) -> PathBuf {
     overlay_dir(workload_id).join("bundle")
 }
 
+/// Path to the file recording the main container ID for a persistent overlay.
+/// Written when a detached container is started; read on every subsequent exec.
+pub fn main_container_id_path(workload_id: &str) -> PathBuf {
+    overlay_dir(workload_id).join("main_container_id")
+}
+
 // =============================================================================
 // Filesystem Helpers
 // =============================================================================
@@ -152,6 +158,14 @@ mod tests {
         assert_eq!(
             bundle_dir(wl),
             PathBuf::from("/storage/overlays/workload-123/bundle")
+        );
+    }
+
+    #[test]
+    fn test_main_container_id_path() {
+        assert_eq!(
+            main_container_id_path("persistent-myvm"),
+            PathBuf::from("/storage/overlays/persistent-myvm/main_container_id")
         );
     }
 }

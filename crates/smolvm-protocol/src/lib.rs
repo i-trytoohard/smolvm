@@ -254,6 +254,11 @@ pub enum AgentRequest {
         /// Enables terminal features like colors, line editing, and signal handling.
         #[serde(default)]
         tty: bool,
+        /// Detached mode — start the container and return immediately with the
+        /// container ID. Only meaningful when `persistent_overlay_id` is set.
+        /// Returns a `Completed` response with `stdout` containing the container ID.
+        #[serde(default)]
+        detached: bool,
         /// If set, use a persistent overlay that survives across exec sessions.
         /// The overlay is identified by this ID (typically the machine name)
         /// and reused on subsequent runs. If not set, an ephemeral overlay is

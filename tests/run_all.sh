@@ -108,6 +108,9 @@ case "$TESTS_TO_RUN" in
     pack-quick)
         run_suite "Pack Tests (Quick)" "$SCRIPT_DIR/test_pack.sh" --quick
         ;;
+    exec-join)
+        run_suite "Exec-Join Container Tests" "$SCRIPT_DIR/test_exec_join.sh"
+        ;;
     bench)
         echo ""
         echo "Running performance benchmarks (not pass/fail tests)..."
@@ -129,10 +132,11 @@ case "$TESTS_TO_RUN" in
         run_suite "HTTP API Tests" "$SCRIPT_DIR/test_api.sh"
         run_suite "Pack Tests" "$SCRIPT_DIR/test_pack.sh"
         run_suite "Smolfile & SSH Agent Tests" "$SCRIPT_DIR/test_smolfile.sh"
+        run_suite "Exec-Join Container Tests" "$SCRIPT_DIR/test_exec_join.sh"
         ;;
     *)
         echo "Unknown test suite: $TESTS_TO_RUN"
-        echo "Available: cli, machine, virtio-net, smolfile, api, pack, pack-quick, bench, bench-vm, all"
+        echo "Available: cli, machine, virtio-net, smolfile, api, pack, pack-quick, exec-join, bench, bench-vm, all"
         exit 1
         ;;
 esac

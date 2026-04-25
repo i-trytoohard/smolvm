@@ -84,6 +84,25 @@ impl CrunCommand {
         c
     }
 
+    /// Run a container detached: `crun run --detach --bundle <path> <id>`
+    ///
+    /// Returns immediately after the container process is started. The container
+    /// continues running independently. Use `crun state` to check status.
+    pub fn run_detach(bundle_dir: &Path, container_id: &str) -> Self {
+        let mut c = Self::new();
+        c.cmd.args([
+            "run",
+            "--detach",
+            "--bundle",
+            &bundle_dir.to_string_lossy(),
+            container_id,
+        ]);
+        c.cmd.stdin(Stdio::null());
+        c.cmd.stdout(Stdio::null());
+        c.cmd.stderr(Stdio::null());
+        c
+    }
+
     /// Start a container: `crun start <id>`
     pub fn start(container_id: &str) -> Self {
         let mut c = Self::new();

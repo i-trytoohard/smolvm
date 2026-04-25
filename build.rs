@@ -226,58 +226,71 @@ fn link_libkrun() {
         }
     }
 
-    // Option 5: System installation via pkg-config
-    if pkg_config::Config::new()
-        .atleast_version("1.0")
-        .probe("libkrun")
-        .is_ok()
-    {
-        return;
-    }
+    // Auto-detect bundled libraries — required, no system fallback.
+    //
+    // smolvm ships patched versions of libkrun/libkrunfw in lib/. System or
+    // Homebrew installations must not be used because they lack smolvm-specific
+    // fixes. Build fails with a clear error if the bundled library is missing.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
 
-    // Option 6: Common installation paths
     #[cfg(target_os = "macos")]
     {
-        let paths = [
-            "/opt/homebrew/lib",
-            "/usr/local/lib",
-            "/opt/homebrew/opt/libkrun/lib",
-            "/usr/local/opt/libkrun/lib",
+        let candidates = [
+            format!("{}/lib", manifest_dir),
+            format!("{}/../lib", manifest_dir),
         ];
 
-        for path in paths {
-            if std::path::Path::new(path).join("libkrun.dylib").exists() {
-                println!("cargo:rustc-link-search=native={}", path);
+        for dir_str in &candidates {
+            let lib_path = std::path::Path::new(dir_str).join("libkrun.dylib");
+            if lib_path.exists() {
+                let canonical = std::fs::canonicalize(dir_str)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dir_str));
+                println!(
+                    "cargo:warning=Using bundled libkrun from {}",
+                    canonical.display()
+                );
+                println!("cargo:rustc-link-search=native={}", canonical.display());
                 link_krun();
-                // Set rpath so runtime linker can find dependencies
-                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path);
+                // Relative rpaths for portable distribution layout
+                println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/lib");
+                println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../lib");
+                // Absolute rpath for development builds where binary lives in target/release/
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", canonical.display());
+                // Embed the lib dir so the launcher can preload libkrunfw at runtime.
+                // This is read by launcher.rs via option_env!("SMOLVM_BUNDLED_LIB_DIR").
+                println!(
+                    "cargo:rustc-env=SMOLVM_BUNDLED_LIB_DIR={}",
+                    canonical.display()
+                );
                 return;
             }
         }
+
+        eprintln!(
+            "error: smolvm bundled libkrun not found.\n\
+             Checked:\n  {}/lib/libkrun.dylib\n  {}/../lib/libkrun.dylib\n\
+             smolvm requires its bundled libkrun — system or Homebrew installations are not\n\
+             supported because they lack smolvm-specific patches. Ensure the lib/ directory\n\
+             exists at the repository root (run: git lfs pull).",
+            manifest_dir, manifest_dir
+        );
+        std::process::exit(1);
     }
 
     #[cfg(target_os = "linux")]
     {
-        let paths = [
-            "/usr/lib",
-            "/usr/local/lib",
-            "/usr/lib64",
-            "/usr/local/lib64",
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/lib/aarch64-linux-gnu",
-        ];
-
-        for path in paths {
-            if std::path::Path::new(path).join("libkrun.so").exists() {
-                println!("cargo:rustc-link-search=native={}", path);
-                link_krun();
-                return;
-            }
-        }
+        // Linux bundled detection already handled in Option 4 above.
+        // If we reach here, no bundled library was found.
+        eprintln!(
+            "error: smolvm bundled libkrun not found.\n\
+             Checked: {}/lib/linux-{}/libkrun.so\n\
+             smolvm requires its bundled libkrun. Ensure the lib/ directory exists\n\
+             (run: git lfs pull).",
+            manifest_dir,
+            std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default()
+        );
+        std::process::exit(1);
     }
-
-    // Fallback
-    link_krun();
 }
 
 /// Build libkrun from the vendored submodule.
